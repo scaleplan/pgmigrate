@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 PGmigrate - PostgreSQL migrations made easy
 """
@@ -96,6 +96,7 @@ class ConflictTerminator(threading.Thread):
     """
     Kills conflicting pids (only on postgresql > 9.6)
     """
+
     def __init__(self, conn_str, interval):
         threading.Thread.__init__(self, name='terminator')
         self.daemon = True
@@ -142,7 +143,7 @@ class ConflictTerminator(threading.Thread):
                               FROM pg_stat_activity
                               WHERE application_name
                                   LIKE '%%' || %s || '%%') as b
-                        """, (conn_id, ))
+                        """, (conn_id,))
                     terminated = [x[0] for x in cursor.fetchall()]
                     for i in terminated:
                         self.log.info('Terminated conflicting pid: %s', i)
@@ -224,7 +225,7 @@ Callbacks = namedtuple('Callbacks',
 
 Config = namedtuple('Config',
                     ('target', 'baseline', 'cursor', 'dryrun', 'callbacks',
-                     'user', 'base_dir', 'conn', 'session', 'conn_instance',
+                     'user', 'dbname', 'base_dir', 'conn', 'session', 'conn_instance',
                      'terminator_instance', 'termination_interval'))
 
 CONFIG_IGNORE = ['cursor', 'conn_instance', 'terminator_instance']
@@ -273,9 +274,9 @@ def _get_downgrades_info_from_dir(base_dir):
                 ('Found downgrades with same version: {version} '
                  '\nfirst : {first_path}'
                  '\nsecond: {second_path}').format(
-                     version=version,
-                     first_path=downgrade.file_path,
-                     second_path=downgrades[version].file_path))
+                    version=version,
+                    first_path=downgrade.file_path,
+                    second_path=downgrades[version].file_path))
         downgrades[version] = downgrade
 
     return downgrades
@@ -315,9 +316,9 @@ def _get_migrations_info_from_dir(base_dir):
                 ('Found migrations with same version: {version} '
                  '\nfirst : {first_path}'
                  '\nsecond: {second_path}').format(
-                     version=version,
-                     first_path=migration.file_path,
-                     second_path=migrations[version].file_path))
+                    version=version,
+                    first_path=migration.file_path,
+                    second_path=migrations[version].file_path))
         migrations[version] = migration
 
     return migrations
@@ -349,7 +350,7 @@ def _get_migrations_info(base_dir, baseline_v, target_v):
         target = target_v if target_v is not None else float('-inf')
 
         for version, ret in _get_downgrades_info_from_dir(base_dir).items():
-            if baseline_v < version <= target:
+            if baseline_v > version >= target:
                 downgrades[version] = ret.meta
             else:
                 LOG.info(
@@ -416,7 +417,7 @@ def _set_baseline(baseline_v, user, cursor):
     """
     cursor.execute(
         'SELECT EXISTS(SELECT 1 FROM public'
-        '.schema_version WHERE version >= %s::bigint)', (baseline_v, ))
+        '.schema_version WHERE version >= %s::bigint)', (baseline_v,))
     check_failed = cursor.fetchone()[0]
 
     if check_failed:
@@ -455,7 +456,7 @@ def _init_schema(cursor):
         'DEFAULT %s, '
         'installed_by TEXT NOT NULL, '
         'installed_on TIMESTAMP WITHOUT time ZONE '
-        'DEFAULT now() NOT NULL)', ('auto', ))
+        'DEFAULT now() NOT NULL)', ('auto',))
     LOG.info(cursor.statusmessage)
 
 
@@ -526,9 +527,10 @@ def _apply_version(version, base_dir, user, cursor):
             (text(version), version_info.meta['description'], user))
     else:
         cursor.execute(
-            'DELETE FROM pgmigrate.schema_version '
+            'DELETE FROM public.schema_version '
             'WHERE version > %s::bigint',
             (text(version)))
+
 
 def _parse_str_callbacks(callbacks, ret, base_dir):
     callbacks = callbacks.split(',')
@@ -752,6 +754,7 @@ def migrate(config):
 
     state = _get_state(config.base_dir, config.baseline, config.target,
                        config.cursor)
+
     not_applied = [x for x in state if state[x]['installed_on'] is None]
     non_trans = [x for x in not_applied if not state[x]['transactional']]
 
@@ -805,9 +808,10 @@ CONFIG_DEFAULTS = Config(target=None,
                          callbacks='',
                          base_dir='',
                          user=None,
+                         dbname=None,
                          session=['SET lock_timeout = 0'],
                          conn='dbname=postgres user=postgres '
-                         'connect_timeout=1',
+                              'connect_timeout=1',
                          conn_instance=None,
                          terminator_instance=None,
                          termination_interval=None)
@@ -843,6 +847,9 @@ def get_config(base_dir, args=None):
         conf = conf._replace(terminator_instance=ConflictTerminator(
             conf.conn, conf.termination_interval))
         conf.terminator_instance.start()
+
+    if conf.dbname is not None:
+        conf = conf._replace(conn=re.sub('dbname=\w+', 'dbname=%s' % conf.dbname, conf.conn))
 
     conf = conf._replace(conn_instance=_create_connection(conf))
     conf = conf._replace(cursor=_init_cursor(conf.conn_instance, conf.session))
@@ -881,12 +888,16 @@ def _main():
                         '--user',
                         type=str,
                         help='Override database user in migration info')
+    parser.add_argument('-p',
+                        '--dbname',
+                        type=str,
+                        help='Override database name in migration info')
     parser.add_argument('-b', '--baseline', type=int, help='Baseline version')
     parser.add_argument('-a',
                         '--callbacks',
                         type=str,
                         help='Comma-separated list of callbacks '
-                        '(type:dir/file)')
+                             '(type:dir/file)')
     parser.add_argument('-s',
                         '--session',
                         action='append',

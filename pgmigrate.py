@@ -215,6 +215,8 @@ def _is_initialized(cursor):
 
 MIGRATION_FILE_RE = re.compile(r'V(?P<version>\d+)__(?P<description>.+)\.sql$')
 
+IS_UPGRADE = True
+
 MigrationInfo = namedtuple('MigrationInfo', ('meta', 'file_path'))
 
 Callbacks = namedtuple('Callbacks',
@@ -235,6 +237,48 @@ def _get_files_from_dir(path):
     for root, _, files in os.walk(path):
         for fname in files:
             yield os.path.basename(fname), os.path.join(root, fname)
+
+
+def _get_downgrades_info_from_dir(base_dir):
+    """
+    Get all downgrades from base dir
+    """
+    path = os.path.join(base_dir, 'downgrades')
+    downgrades = {}
+    if not (os.path.exists(path) and os.path.isdir(path)):
+        raise ConfigurationError(
+            'Downgrades dir not found (expected to be {path})'.format(
+                path=path))
+    for fname, file_path in _get_files_from_dir(path):
+        match = MIGRATION_FILE_RE.match(fname)
+        if match is None:
+            LOG.warning('File %s does not match by pattern %s. Skipping it.',
+                        file_path, MIGRATION_FILE_RE.pattern)
+            continue
+        version = int(match.group('version'))
+        ret = dict(
+            version=version,
+            type='auto',
+            installed_by=None,
+            installed_on=None,
+            description=match.group('description').replace('_', ' '),
+        )
+        ret['transactional'] = 'NONTRANSACTIONAL' not in ret['description']
+        downgrade = MigrationInfo(
+            ret,
+            file_path,
+        )
+        if version in downgrades:
+            raise MalformedMigration(
+                ('Found downgrades with same version: {version} '
+                 '\nfirst : {first_path}'
+                 '\nsecond: {second_path}').format(
+                     version=version,
+                     first_path=downgrade.file_path,
+                     second_path=downgrades[version].file_path))
+        downgrades[version] = downgrade
+
+    return downgrades
 
 
 def _get_migrations_info_from_dir(base_dir):
@@ -283,20 +327,38 @@ def _get_migrations_info(base_dir, baseline_v, target_v):
     """
     Get migrations from baseline to target from base dir
     """
-    migrations = {}
-    target = target_v if target_v is not None else float('inf')
+    if target_v >= baseline_v:
+        migrations = {}
+        target = target_v if target_v is not None else float('inf')
 
-    for version, ret in _get_migrations_info_from_dir(base_dir).items():
-        if baseline_v < version <= target:
-            migrations[version] = ret.meta
-        else:
-            LOG.info(
-                'Ignore migration %r cause baseline: %r or target: %r',
-                ret,
-                baseline_v,
-                target,
-            )
-    return migrations
+        for version, ret in _get_migrations_info_from_dir(base_dir).items():
+            if baseline_v < version <= target:
+                migrations[version] = ret.meta
+            else:
+                LOG.info(
+                    'Ignore migration %r cause baseline: %r or target: %r',
+                    ret,
+                    baseline_v,
+                    target,
+                )
+        return migrations
+    else:
+        downgrades = {}
+        global IS_UPGRADE
+        IS_UPGRADE = False
+        target = target_v if target_v is not None else float('-inf')
+
+        for version, ret in _get_downgrades_info_from_dir(base_dir).items():
+            if baseline_v < version <= target:
+                downgrades[version] = ret.meta
+            else:
+                LOG.info(
+                    'Ignore downgrade %r cause baseline: %r or target: %r',
+                    ret,
+                    baseline_v,
+                    target,
+                )
+        return downgrades
 
 
 def _get_info(base_dir, baseline_v, target_v, cursor):
@@ -321,12 +383,17 @@ def _get_info(base_dir, baseline_v, target_v, cursor):
         baseline_v = max(baseline_v, sorted(ret.keys())[-1])
 
     migrations_info = _get_migrations_info(base_dir, baseline_v, target_v)
+    new_ret = {}
     for version in migrations_info:
         num = migrations_info[version]['version']
-        if num not in ret:
-            ret[num] = migrations_info[version]
+        if IS_UPGRADE:
+            if num not in ret:
+                new_ret[num] = migrations_info[version]
+        else:
+            if num in ret or num == 0:
+                new_ret[num] = migrations_info[version]
 
-    return ret
+    return new_ret
 
 
 def _get_database_user(cursor):
@@ -441,17 +508,27 @@ def _apply_version(version, base_dir, user, cursor):
     """
     Execute all statements in migration version
     """
-    all_versions = _get_migrations_info_from_dir(base_dir)
+    if IS_UPGRADE:
+        all_versions = _get_migrations_info_from_dir(base_dir)
+    else:
+        all_versions = _get_downgrades_info_from_dir(base_dir)
+
     version_info = all_versions[version]
     LOG.info('Try apply version %r', version_info)
 
     _apply_file(version_info.file_path, cursor)
-    cursor.execute(
-        'INSERT INTO public.schema_version '
-        '(version, description, installed_by) '
-        'VALUES (%s::bigint, %s, %s)',
-        (text(version), version_info.meta['description'], user))
 
+    if IS_UPGRADE:
+        cursor.execute(
+            'INSERT INTO public.schema_version '
+            '(version, description, installed_by) '
+            'VALUES (%s::bigint, %s, %s)',
+            (text(version), version_info.meta['description'], user))
+    else:
+        cursor.execute(
+            'DELETE FROM pgmigrate.schema_version '
+            'WHERE version > %s::bigint',
+            (text(version)))
 
 def _parse_str_callbacks(callbacks, ret, base_dir):
     callbacks = callbacks.split(',')
@@ -515,7 +592,13 @@ def _migrate_step(state, callbacks, base_dir, user, cursor):
     if not _is_initialized(cursor):
         LOG.info('schema not initialized')
         _init_schema(cursor)
-    for version in sorted(state.keys()):
+
+    if IS_UPGRADE:
+        state_keys = sorted(state.keys())
+    else:
+        state_keys = sorted(state.keys(), key=None, reverse=True)
+
+    for version in state_keys:
         LOG.debug('has version %r', version)
         if state[version]['installed_on'] is None:
             should_migrate = True

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 setup.py for pgmigrate
 """
@@ -40,15 +40,15 @@ if sys.version_info < (3, 0):
     REQUIREMENTS.append('future >= 0.17.1')
 
 setup(
-    name='yandex-pgmigrate',
-    version='1.0.4',
+    name='scaleplan-pgmigrate',
+    version='1.0.4.1',
     description='PostgreSQL migrations made easy',
     license='PostgreSQL License',
-    url='https://github.com/yandex/pgmigrate/',
+    url='https://github.com/scaleplan/pgmigrate/',
     author='Yandex LLC',
     author_email='opensource@yandex-team.ru',
-    maintainer='Yandex LLC',
-    maintainer_email='opensource@yandex-team.ru',
+    maintainer='Aleksandr Avtomonov',
+    maintainer_email='admin@qooiz.me',
     zip_safe=False,
     platforms=['Linux', 'BSD', 'MacOS'],
     packages=['.'],
